@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Container>
+  <Name>Smart Array P410</Name>
+  <PluginURL>https://raw.githubusercontent.com/francuz152/unraid-p410mgr/main/p410mgr.plg</PluginURL>
+  <PluginAuthor>francuz152</PluginAuthor>
+  <Category>Tools:System Drivers:</Category>
+  <Overview>Manage HP Smart Array controllers (P410, P410i, P212, P812 and related G6/G7 models) from the Unraid GUI. Shows controller, cache and battery status and maps every drive bay to its logical drive, /dev device and Unraid slot. Read SMART through the controller (cciss), toggle the locate LED, create a RAID0 logical drive for a new disk and delete unused logical drives without rebooting. Optional periodic SMART checks with Unraid notifications and MQTT publishing with Home Assistant discovery, plus a Dashboard tile. Uses HPE hpssacli, downloaded from the official HPE repository during installation. English and Polish UI.</Overview>
+  <Support>https://github.com/francuz152/unraid-p410mgr/issues</Support>
+  <Project>https://github.com/francuz152/unraid-p410mgr</Project>
+  <Icon>https://raw.githubusercontent.com/francuz152/unraid-p410mgr/main/p410mgr.png</Icon>
+  <MinVer>6.12.0</MinVer>
+</Container>

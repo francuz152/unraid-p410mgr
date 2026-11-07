@@ -1,0 +1,58 @@
+Menu="Dashboard:0"
+Cond="version_compare(parse_ini_file('/etc/unraid-version')['version'],'6.12.0-beta6','>')"
+---
+<?PHP
+require_once '/usr/local/emhttp/plugins/p410mgr/include/i18n.php';
+$p410_csrf = htmlspecialchars($var['csrf_token'] ?? '', ENT_QUOTES);
+$p410_dict = json_encode(p410_js_dict(), JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_APOS);
+$p410_open = htmlspecialchars(p410_t('d_open'), ENT_QUOTES);
+$p410_ld   = htmlspecialchars(p410_t('js_loading'), ENT_QUOTES);
+$mytiles['p410mgr']['column2'] = <<<EOT
+<tbody id="db-p410mgr" title="Smart Array P410">
+<tr><td>
+  <i class="fa fa-hdd-o f32"></i>
+  <div class="section">Smart Array P410<br><span id="p410db-sub">$p410_ld</span><br></div>
+  <a href="/Settings/P410mgr" title="$p410_open"><i class="fa fa-fw fa-cog control"></i></a>
+</td></tr>
+<tr><td><div id="p410db-body" style="line-height:1.7"></div></td></tr>
+</tbody>
+<script>var P410DB_CSRF="$p410_csrf"; var P410DB_T=$p410_dict;</script>
+EOT;
+$mytiles['p410mgr']['column2'] .= <<<'EOT'
+<script>
+(function(){
+  const URL = '/plugins/p410mgr/include/exec.php';
+  const T = k => (typeof P410DB_T !== 'undefined' && P410DB_T[k]) || k;
+  const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const col = s => /^ok$/i.test(s||'') ? '#3fb950' : (/fail|error/i.test(s||'') ? '#f85149' : '#d29922');
+  async function load(){
+    let r;
+    try {
+      const body = new URLSearchParams({csrf_token: (typeof P410DB_CSRF!=='undefined' && P410DB_CSRF) || (typeof csrf_token!=='undefined' ? csrf_token : ''), action:'summary'});
+      const res = await fetch(URL, {method:'POST', body, credentials:'same-origin'});
+      r = await res.json();
+    } catch(e){ r = {ok:false, msg: T('d_no_resp')}; }
+    const sub = document.getElementById('p410db-sub'), el = document.getElementById('p410db-body');
+    if (!sub || !el) return;
+    if (!r.ok){ sub.innerHTML = '<span style="color:#f85149">' + esc(T('js_error')) + '</span>'; el.textContent = r.msg || ''; return; }
+    const allOk = r.controllers.every(c => /^ok$/i.test(c.ctrl) && (c.ign_cache || /^ok$/i.test(c.cache)) && (c.ign_battery || /^ok$|^—$/i.test(c.battery)) && !c.bad.length);
+    sub.innerHTML = allOk ? '<span style="color:#3fb950">' + esc(T('d_all_ok')) + '</span>' : '<span style="color:#d29922">' + esc(T('d_attention')) + '</span>';
+    const ign = (v, flag) => flag && !/^ok$/i.test(v) ? [v + ' (' + T('d_ignored') + ')', '#8b949e'] : [v, col(v)];
+    el.innerHTML = r.controllers.map(c => {
+      const row = (k, v, color) => `<div style="display:flex;justify-content:space-between;gap:12px"><span style="opacity:.75">${esc(k)}</span><span${color?` style="color:${color}"`:''}>${esc(v)}</span></div>`;
+      const [cv, cc] = ign(c.cache, c.ign_cache), [bv, bc] = ign(c.battery, c.ign_battery);
+      return `<div style="font-weight:600;margin-bottom:2px">${esc(c.model)} (slot ${esc(c.slot)})</div>`
+        + row(T('d_controller'), c.ctrl, col(c.ctrl))
+        + row(T('d_cache'), cv, cc)
+        + row(T('d_battery'), bv, bc)
+        + row(T('d_drives'), `${c.pds} / ${c.lds}` + (c.unassigned ? ` (${c.unassigned} unassigned)` : ''))
+        + row(T('d_maxtemp'), c.tmax !== null ? c.tmax + ' °C' : '—', c.tmax >= 45 ? '#f85149' : (c.tmax >= 40 ? '#d29922' : ''))
+        + (c.bad.length ? `<div style="color:#f85149;margin-top:4px">${c.bad.map(esc).join('<br>')}</div>` : '');
+    }).join('<hr style="opacity:.2">');
+  }
+  load();
+  setInterval(() => { if (!document.hidden) load(); }, 60000);
+})();
+</script>
+EOT;
+?>

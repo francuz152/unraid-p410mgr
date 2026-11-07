@@ -1,0 +1,1262 @@
+<?xml version='1.0' standalone='yes'?>
+<!DOCTYPE PLUGIN [
+<!ENTITY name "p410mgr">
+<!ENTITY author "francuz152">
+<!ENTITY version "2026.11.07f">
+<!ENTITY github "francuz152/unraid-p410mgr">
+<!ENTITY pluginURL "https://raw.githubusercontent.com/&github;/main/&name;.plg">
+<!ENTITY plugin "/boot/config/plugins/&name;">
+<!ENTITY emhttp "/usr/local/emhttp/plugins/&name;">
+]>
+<PLUGIN name="&name;" author="&author;" version="&version;" pluginURL="&pluginURL;" support="https://github.com/&github;/issues" min="6.9.0" icon="hdd-o">
+
+<CHANGES>
+###2026.11.07f
+- English UI (default) with Polish translation; language: auto / English / Polski
+- Uninstall keeps settings, SMART baseline and the hpssacli package
+- Options to ignore disabled controller cache / failed cache battery
+- Periodic SMART + controller checks, Unraid notifications
+- MQTT publishing with Home Assistant discovery
+- Dashboard tile
+- Status view, SMART, locate LED, create RAID0, delete LD, LD cache
+</CHANGES>
+
+<FILE Name="&emhttp;/README.md">
+<INLINE><![CDATA[
+**Smart Array P410**
+
+Manage HP Smart Array controllers (P410 / P410i / P212 / P812 and related G6/G7 models) from the Unraid GUI:
+controller and drive status, bay → logical drive → /dev → Unraid slot mapping, SMART via cciss,
+locate LED, create RAID0 from a new drive, delete logical drives (blocked while in use), periodic
+SMART checks with Unraid notifications and MQTT / Home Assistant discovery, and a Dashboard tile.
+Uses HPE hpssacli 2.40, downloaded from the official HPE repository (HPE license applies).
+Settings → User Utilities → Smart Array P410.
+]]></INLINE>
+</FILE>
+<FILE Name="/usr/local/emhttp/plugins/p410mgr/P410mgr.page">
+<INLINE><![CDATA[
+Menu="Utilities"
+Title="Smart Array P410"
+Icon="hdd-o"
+---
+<?php
+require_once '/usr/local/emhttp/plugins/p410mgr/include/i18n.php';
+if (!function_exists('p410_h')) { function p410_h(string $k, ...$a): string { return htmlspecialchars(p410_t($k, ...$a), ENT_QUOTES); } }
+if (!function_exists('p410_yn')) { function p410_yn(string $name, bool $yesFirst = true): string {
+  $y = '<option value="yes">' . p410_h('f_yes') . '</option>'; $n = '<option value="no">' . p410_h('f_no') . '</option>';
+  return "<select name=\"$name\">" . ($yesFirst ? $y . $n : $n . $y) . '</select>';
+} }
+if (!function_exists('p410_onoff')) { function p410_onoff(string $name): string {
+  return "<select name=\"$name\"><option value=\"no\">" . p410_h('f_off') . '</option><option value="yes">' . p410_h('f_on') . '</option></select>';
+} }
+?>
+<style>
+#p410 { --p410-line: rgba(127,127,127,.25); --p410-muted: rgba(127,127,127,.95); }
+#p410 .p410-card { border: 1px solid var(--p410-line); border-radius: 6px; padding: 12px 16px; margin: 12px 0; }
+#p410 .p410-head { display: flex; flex-wrap: wrap; gap: 8px 24px; align-items: baseline; }
+#p410 .p410-head h3 { margin: 0 12px 0 0; font-size: 1.15em; }
+#p410 .p410-kv span { color: var(--p410-muted); margin-right: 4px; }
+#p410 table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: .95em; }
+#p410 th, #p410 td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--p410-line); white-space: nowrap; }
+#p410 th { font-weight: 600; color: var(--p410-muted); font-size: .85em; text-transform: uppercase; letter-spacing: .04em; }
+#p410 td.mono { font-family: monospace; }
+#p410 .ok { color: #3fb950; } #p410 .bad { color: #f85149; } #p410 .warn { color: #d29922; }
+#p410 .tag { display: inline-block; padding: 1px 6px; border-radius: 4px; border: 1px solid var(--p410-line); font-size: .85em; }
+#p410 .tag.unassigned { border-color: #d29922; color: #d29922; }
+#p410 .tag.unraid { border-color: #3fb950; color: #3fb950; }
+#p410 button.p410-btn { margin: 0 4px 0 0; padding: 2px 8px; min-width: 0; font-size: .85em; }
+#p410 .p410-scroll { overflow-x: auto; }
+#p410 .p410-msg { margin: 8px 0; white-space: pre-wrap; }
+#p410 .p410-form { display: grid; grid-template-columns: max-content minmax(160px, 320px); gap: 6px 14px; align-items: center; margin-top: 10px; }
+#p410 .p410-form input, #p410 .p410-form select { margin: 0; width: 100%; box-sizing: border-box; }
+@media (max-width: 600px) { #p410 .p410-form { grid-template-columns: 1fr; } }
+#p410-modal { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: none; z-index: 10000; align-items: center; justify-content: center; }
+#p410-modal .box { background: var(--background-color, #1c1c1c); color: inherit; width: min(1000px, 94vw); max-height: 86vh; display: flex; flex-direction: column; border-radius: 8px; border: 1px solid rgba(127,127,127,.4); }
+#p410-modal .bar { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; border-bottom: 1px solid rgba(127,127,127,.3); }
+#p410-modal pre { margin: 0; padding: 12px 14px; overflow: auto; font-size: 12px; }
+</style>
+
+<div id="p410">
+  <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+    <button type="button" onclick="p410Load()"><i class="fa fa-refresh"></i> <?=p410_h('js_refresh')?></button>
+    <span id="p410-status" class="p410-msg"></span>
+  </div>
+  <div id="p410-root"><?=p410_h('js_loading')?></div>
+
+  <div class="p410-card" id="p410-mon">
+    <div class="p410-head"><h3><?=p410_h('js_mon_title')?></h3><span id="p410-last" class="p410-kv"></span></div>
+    <div class="p410-form">
+      <label><?=p410_h('f_lang')?></label><select name="LANG"><option value="auto"><?=p410_h('f_lang_auto')?></option><option value="en">English</option><option value="pl">Polski</option></select>
+      <label><?=p410_h('f_mon')?></label><?=p410_onoff('MON_ENABLED')?>
+      <label><?=p410_h('f_interval')?></label><input name="INTERVAL" type="number" min="5" max="1440">
+      <label><?=p410_h('f_temp')?></label><input name="TEMP_WARN" type="number" min="30" max="70">
+      <label><?=p410_h('f_standby')?></label><?=p410_yn('SKIP_STANDBY')?>
+      <label><?=p410_h('f_ign_cache')?></label><?=p410_yn('IGNORE_CACHE', false)?>
+      <label><?=p410_h('f_ign_batt')?></label><?=p410_yn('IGNORE_BATTERY', false)?>
+      <label><?=p410_h('f_notify')?></label><?=p410_yn('NOTIFY')?>
+      <label><?=p410_h('f_mqtt')?></label><?=p410_onoff('MQTT_ENABLED')?>
+      <label><?=p410_h('f_host')?></label><input name="MQTT_HOST" placeholder="<?=p410_h('f_host_ph')?>">
+      <label><?=p410_h('f_port')?></label><input name="MQTT_PORT" type="number" min="1" max="65535">
+      <label><?=p410_h('f_user')?></label><input name="MQTT_USER" autocomplete="off">
+      <label><?=p410_h('f_pass')?></label><input name="MQTT_PASS" type="password" autocomplete="new-password">
+      <label><?=p410_h('f_topic')?></label><input name="MQTT_TOPIC">
+      <label><?=p410_h('f_disc')?></label><?=p410_yn('MQTT_DISCOVERY')?>
+      <label><?=p410_h('f_disc_prefix')?></label><input name="MQTT_DISCOVERY_PREFIX">
+    </div>
+    <div style="margin-top:10px">
+      <button type="button" onclick="p410SaveCfg()"><i class="fa fa-save"></i> <?=p410_h('b_save')?></button>
+      <button type="button" onclick="p410TestMqtt()"><i class="fa fa-plug"></i> <?=p410_h('b_test')?></button>
+      <button type="button" onclick="p410RunCheck()"><i class="fa fa-stethoscope"></i> <?=p410_h('b_check')?></button>
+      <button type="button" onclick="p410ResetBaseline()" title="<?=p410_h('b_baseline_t')?>"><i class="fa fa-undo"></i> <?=p410_h('b_baseline')?></button>
+    </div>
+    <div id="p410-check" class="p410-msg"></div>
+  </div>
+</div>
+
+<div id="p410-modal" onclick="if(event.target===this)p410Close()">
+  <div class="box">
+    <div class="bar"><strong id="p410-modal-title">SMART</strong><button type="button" onclick="p410Close()"><?=p410_h('js_close')?></button></div>
+    <pre id="p410-modal-text"></pre>
+  </div>
+</div>
+
+<script>
+const P410_URL  = '/plugins/p410mgr/include/exec.php';
+const P410_CSRF = '<?=$var['csrf_token']?>';
+const P410_T    = <?=json_encode(p410_js_dict(), JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_APOS)?>;
+const P410_LANG = '<?=p410_lang()?>';
+
+function T(k, ...a){ let s = P410_T[k] ?? k; a.forEach(v => { s = s.replace('%s', v); }); return s; }
+function p410Esc(s){ return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function p410Cls(st){ st = String(st||'').toLowerCase(); if (st === 'ok') return 'ok'; if (!st) return ''; return /fail|error|missing|not|predict/.test(st) ? 'bad' : 'warn'; }
+
+async function p410Post(data){
+  const body = new URLSearchParams(Object.assign({csrf_token: P410_CSRF}, data));
+  const r = await fetch(P410_URL, {method:'POST', body, credentials:'same-origin'});
+  const t = await r.text();
+  try { return JSON.parse(t); } catch(e){ return {ok:false, msg: T('js_bad_resp') + '\n' + t.slice(0, 500)}; }
+}
+
+function p410Msg(text, ok){ const el = document.getElementById('p410-status'); el.className = 'p410-msg ' + (ok === false ? 'bad' : ok ? 'ok' : ''); el.textContent = text || ''; }
+
+async function p410Load(){
+  p410Msg(T('js_reading'));
+  const r = await p410Post({action:'status'});
+  if (!r.ok || r.error){ p410Msg(r.error || r.msg || T('js_error'), false); document.getElementById('p410-root').innerHTML=''; return; }
+  document.getElementById('p410-root').innerHTML = r.controllers.map(p410RenderCtrl).join('');
+  p410Msg(T('js_read_at', new Date().toLocaleTimeString(P410_LANG)));
+}
+
+function p410RenderCtrl(c){
+  const d = c.detail || {};
+  const keys = ['Controller Status','Firmware Version','Cache Status','Total Cache Size','Accelerator Ratio','Battery/Capacitor Count','Battery/Capacitor Status','Controller Temperature (C)','Drive Write Cache','No-Battery Write Cache'];
+  const kv = keys.filter(k => d[k] !== undefined).map(k => `<span class="p410-kv"><span>${p410Esc(k)}:</span><b class="${/Status/.test(k)?p410Cls(d[k]):''}">${p410Esc(d[k])}</b></span>`).join('');
+  const ldMap = {}; (c.lds||[]).forEach(l => ldMap[l.ld] = l);
+  const ctrlCacheOk = /^ok$/i.test(d['Cache Status'] || '');
+  const rows = (c.pds||[]).map(p => {
+    const ld = p.lds && p.lds.length ? ldMap[p.lds[0]] : null;
+    const pdA = p410Esc(p.pd), s = p410Esc(c.slot);
+    let acts = `<button class="p410-btn" type="button" title="${p410Esc(T('js_led_on_t'))}" onclick="p410Led('${s}','${pdA}','on')"><i class="fa fa-lightbulb-o"></i> ${p410Esc(T('js_led_on'))}</button>`
+             + `<button class="p410-btn" type="button" title="${p410Esc(T('js_led_off_t'))}" onclick="p410Led('${s}','${pdA}','off')"><i class="fa fa-circle-o"></i> ${p410Esc(T('js_led_off'))}</button>`
+             + `<button class="p410-btn" type="button" onclick="p410Smart('${s}','${pdA}')"><i class="fa fa-heartbeat"></i> SMART</button>`;
+    if (p.unassigned) acts += `<button class="p410-btn" type="button" onclick="p410Create('${s}','${pdA}')"><i class="fa fa-plus"></i> ${p410Esc(T('js_create'))}</button>`;
+    if (ld){
+      const inUse = !!ld.unraid;
+      acts += `<button class="p410-btn" type="button" ${inUse ? 'disabled title="' + p410Esc(T('js_in_unraid')) + '"' : ''} onclick="p410Delete('${s}','${p410Esc(ld.ld)}','${p410Esc(ld.dev)}')"><i class="fa fa-trash"></i> ${p410Esc(T('js_delete'))}</button>`;
+      if (/disabled/i.test(ld.caching)) {
+        acts += ctrlCacheOk
+          ? `<button class="p410-btn" type="button" onclick="p410Cache('${s}','${p410Esc(ld.ld)}','enable')"><i class="fa fa-bolt"></i> ${p410Esc(T('js_cache_on'))}</button>`
+          : `<button class="p410-btn" type="button" disabled title="${p410Esc(T('js_cache_off_t', d['Cache Status'] || '?'))}"><i class="fa fa-bolt"></i> ${p410Esc(T('js_cache_on'))}</button>`;
+      }
+    }
+    const unraid = p.unassigned ? '<span class="tag unassigned">unassigned</span>'
+                 : ld && ld.unraid ? `<span class="tag unraid">${p410Esc(ld.unraid)}</span>` : '<span class="tag">—</span>';
+    return `<tr>
+      <td>${p.bay ?? ''}</td><td class="mono">${pdA}</td><td>${p410Esc(p.type)}</td><td>${p410Esc(p.size)}</td>
+      <td>${p410Esc(p.model)}</td><td class="mono">${p410Esc(p.serial)}</td>
+      <td>${p.temp ? p410Esc(p.temp)+' °C' : ''}</td><td class="${p410Cls(p.status)}">${p410Esc(p.status)}</td>
+      <td>${ld ? 'LD '+p410Esc(ld.ld)+' <span style="opacity:.7">('+p410Esc(ld.raid)+', <span class="'+p410Cls(ld.status)+'">'+p410Esc(ld.status)+'</span>)</span>' : ''}</td>
+      <td class="mono">${ld ? p410Esc(ld.dev) + (ld.dev && !ld.present ? ' <span class="warn" title="' + p410Esc(T('js_detached_t')) + '">(' + p410Esc(T('js_detached')) + ')</span>' : '') : ''}</td>
+      <td>${ld ? p410Esc(ld.caching) : ''}</td>
+      <td>${unraid}</td><td>${acts}</td></tr>`;
+  }).join('');
+  const th = ['js_bay','js_drive','js_type','js_size','js_model','js_serial','js_temp','js_state','js_volume','js_cache','js_unraid','js_actions'].map(k => `<th>${p410Esc(T(k))}</th>`);
+  th.splice(9, 0, '<th>/dev</th>');
+  return `<div class="p410-card">
+    <div class="p410-head"><h3>${p410Esc(c.model)} — slot ${p410Esc(c.slot)}</h3>${kv}</div>
+    <div class="p410-scroll"><table>
+      <thead><tr>${th.join('')}</tr></thead>
+      <tbody>${rows || '<tr><td colspan="13">' + p410Esc(T('js_no_drives')) + '</td></tr>'}</tbody>
+    </table></div></div>`;
+}
+
+async function p410Led(slot, pd, state){ const r = await p410Post({action:'led', slot, pd, state}); p410Msg(r.msg, r.ok); }
+
+async function p410Smart(slot, pd){
+  p410Msg(T('js_smart_read', pd));
+  const r = await p410Post({action:'smart', slot, pd});
+  if (!r.ok){ p410Msg(r.msg, false); return; }
+  p410Msg('');
+  document.getElementById('p410-modal-title').textContent = 'SMART ' + pd + ' — ' + r.msg;
+  document.getElementById('p410-modal-text').textContent = r.text;
+  document.getElementById('p410-modal').style.display = 'flex';
+}
+function p410Close(){ document.getElementById('p410-modal').style.display = 'none'; }
+
+async function p410Create(slot, pd){
+  if (!confirm(T('js_create_q', pd))) return;
+  p410Msg(T('js_creating'));
+  const r = await p410Post({action:'create', slot, pd});
+  p410Msg(r.msg, r.ok); if (r.ok) p410Load();
+}
+
+async function p410Delete(slot, ld, dev){
+  const v = prompt(T('js_delete_q', ld, dev ? ' (' + dev + ')' : '', ld));
+  if (v === null) return;
+  if (v.trim() !== String(ld)){ p410Msg(T('js_cancelled'), false); return; }
+  p410Msg(T('js_deleting'));
+  const r = await p410Post({action:'delete', slot, ld, confirm: v.trim()});
+  p410Msg(r.msg, r.ok); if (r.ok) p410Load();
+}
+
+async function p410Cache(slot, ld, state){ const r = await p410Post({action:'cache', slot, ld, state}); p410Msg(r.msg, r.ok); if (r.ok) p410Load(); }
+
+function p410RenderCheck(st){
+  const el = document.getElementById('p410-check'), last = document.getElementById('p410-last');
+  if (!st){ last.innerHTML = '<span>' + p410Esc(T('js_last')) + '</span><b>' + p410Esc(T('js_never')) + '</b>'; el.textContent = ''; return; }
+  last.innerHTML = '<span>' + p410Esc(T('js_last')) + '</span><b>' + p410Esc(new Date(st.ts).toLocaleString(P410_LANG)) + '</b> '
+    + (st.problem ? '<b class="bad">' + p410Esc(T('js_problems', st.problems.length)) + '</b>' : '<b class="ok">OK</b>')
+    + (st.mqtt ? ' <span>MQTT:</span><b class="' + (st.mqtt === 'OK' ? 'ok' : 'bad') + '">' + p410Esc(st.mqtt) + '</b>' : '');
+  el.className = 'p410-msg ' + (st.problem ? 'bad' : '');
+  el.textContent = st.problem ? st.problems.join('\n') : '';
+}
+async function p410LoadCfg(){
+  const r = await p410Post({action:'getcfg'}); if (!r.ok) return;
+  document.querySelectorAll('#p410-mon [name]').forEach(e => { if (r.cfg[e.name] !== undefined) e.value = r.cfg[e.name]; });
+  const s = await p410Post({action:'laststate'}); if (s.ok) p410RenderCheck(s.state);
+}
+async function p410SaveCfg(){
+  const d = {action:'savecfg'};
+  const oldLang = P410_LANG;
+  document.querySelectorAll('#p410-mon [name]').forEach(e => d['cfg[' + e.name + ']'] = e.value);
+  const r = await p410Post(d); p410Msg(r.msg, r.ok);
+  if (r.ok && d['cfg[LANG]'] !== 'auto' && d['cfg[LANG]'] !== oldLang) { location.reload(); return; }
+  if (r.ok) p410LoadCfg();
+}
+async function p410TestMqtt(){ p410Msg(T('js_test_run')); const r = await p410Post({action:'testmqtt'}); p410Msg(r.msg, r.ok); }
+async function p410RunCheck(){
+  p410Msg(T('js_checking'));
+  const r = await p410Post({action:'runcheck'});
+  if (!r.ok){ p410Msg(r.msg, false); return; }
+  p410RenderCheck(r.state); p410Msg(T('js_check_done'), !r.state.problem);
+}
+async function p410ResetBaseline(){
+  if (!confirm(T('js_baseline_q'))) return;
+  const r = await p410Post({action:'resetbaseline'}); p410Msg(r.msg, r.ok);
+}
+
+p410Load();
+p410LoadCfg();
+</script>
+]]></INLINE>
+</FILE>
+<FILE Name="/usr/local/emhttp/plugins/p410mgr/P410mgrDash.page">
+<INLINE><![CDATA[
+Menu="Dashboard:0"
+Cond="version_compare(parse_ini_file('/etc/unraid-version')['version'],'6.12.0-beta6','>')"
+---
+<?PHP
+require_once '/usr/local/emhttp/plugins/p410mgr/include/i18n.php';
+$p410_csrf = htmlspecialchars($var['csrf_token'] ?? '', ENT_QUOTES);
+$p410_dict = json_encode(p410_js_dict(), JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_APOS);
+$p410_open = htmlspecialchars(p410_t('d_open'), ENT_QUOTES);
+$p410_ld   = htmlspecialchars(p410_t('js_loading'), ENT_QUOTES);
+$mytiles['p410mgr']['column2'] = <<<EOT
+<tbody id="db-p410mgr" title="Smart Array P410">
+<tr><td>
+  <i class="fa fa-hdd-o f32"></i>
+  <div class="section">Smart Array P410<br><span id="p410db-sub">$p410_ld</span><br></div>
+  <a href="/Settings/P410mgr" title="$p410_open"><i class="fa fa-fw fa-cog control"></i></a>
+</td></tr>
+<tr><td><div id="p410db-body" style="line-height:1.7"></div></td></tr>
+</tbody>
+<script>var P410DB_CSRF="$p410_csrf"; var P410DB_T=$p410_dict;</script>
+EOT;
+$mytiles['p410mgr']['column2'] .= <<<'EOT'
+<script>
+(function(){
+  const URL = '/plugins/p410mgr/include/exec.php';
+  const T = k => (typeof P410DB_T !== 'undefined' && P410DB_T[k]) || k;
+  const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const col = s => /^ok$/i.test(s||'') ? '#3fb950' : (/fail|error/i.test(s||'') ? '#f85149' : '#d29922');
+  async function load(){
+    let r;
+    try {
+      const body = new URLSearchParams({csrf_token: (typeof P410DB_CSRF!=='undefined' && P410DB_CSRF) || (typeof csrf_token!=='undefined' ? csrf_token : ''), action:'summary'});
+      const res = await fetch(URL, {method:'POST', body, credentials:'same-origin'});
+      r = await res.json();
+    } catch(e){ r = {ok:false, msg: T('d_no_resp')}; }
+    const sub = document.getElementById('p410db-sub'), el = document.getElementById('p410db-body');
+    if (!sub || !el) return;
+    if (!r.ok){ sub.innerHTML = '<span style="color:#f85149">' + esc(T('js_error')) + '</span>'; el.textContent = r.msg || ''; return; }
+    const allOk = r.controllers.every(c => /^ok$/i.test(c.ctrl) && (c.ign_cache || /^ok$/i.test(c.cache)) && (c.ign_battery || /^ok$|^—$/i.test(c.battery)) && !c.bad.length);
+    sub.innerHTML = allOk ? '<span style="color:#3fb950">' + esc(T('d_all_ok')) + '</span>' : '<span style="color:#d29922">' + esc(T('d_attention')) + '</span>';
+    const ign = (v, flag) => flag && !/^ok$/i.test(v) ? [v + ' (' + T('d_ignored') + ')', '#8b949e'] : [v, col(v)];
+    el.innerHTML = r.controllers.map(c => {
+      const row = (k, v, color) => `<div style="display:flex;justify-content:space-between;gap:12px"><span style="opacity:.75">${esc(k)}</span><span${color?` style="color:${color}"`:''}>${esc(v)}</span></div>`;
+      const [cv, cc] = ign(c.cache, c.ign_cache), [bv, bc] = ign(c.battery, c.ign_battery);
+      return `<div style="font-weight:600;margin-bottom:2px">${esc(c.model)} (slot ${esc(c.slot)})</div>`
+        + row(T('d_controller'), c.ctrl, col(c.ctrl))
+        + row(T('d_cache'), cv, cc)
+        + row(T('d_battery'), bv, bc)
+        + row(T('d_drives'), `${c.pds} / ${c.lds}` + (c.unassigned ? ` (${c.unassigned} unassigned)` : ''))
+        + row(T('d_maxtemp'), c.tmax !== null ? c.tmax + ' °C' : '—', c.tmax >= 45 ? '#f85149' : (c.tmax >= 40 ? '#d29922' : ''))
+        + (c.bad.length ? `<div style="color:#f85149;margin-top:4px">${c.bad.map(esc).join('<br>')}</div>` : '');
+    }).join('<hr style="opacity:.2">');
+  }
+  load();
+  setInterval(() => { if (!document.hidden) load(); }, 60000);
+})();
+</script>
+EOT;
+?>
+]]></INLINE>
+</FILE>
+<FILE Name="/usr/local/emhttp/plugins/p410mgr/include/i18n.php">
+<INLINE><![CDATA[
+<?php
+/* p410mgr — tłumaczenia / translations (EN default, PL) */
+
+function p410_lang(): string {
+  static $lang = null;
+  if ($lang !== null) return $lang;
+  $cfg = @parse_ini_file('/boot/config/plugins/p410mgr/p410mgr.cfg', false, INI_SCANNER_RAW) ?: [];
+  $sel = $cfg['LANG'] ?? 'auto';
+  if ($sel === 'en' || $sel === 'pl') return $lang = $sel;
+  $dyn = @parse_ini_file('/boot/config/plugins/dynamix/dynamix.cfg', true, INI_SCANNER_RAW) ?: [];
+  $loc = $dyn['display']['locale'] ?? '';
+  return $lang = (stripos($loc, 'pl') === 0) ? 'pl' : 'en';
+}
+
+function p410_strings(): array {
+  return [
+    /* backend */
+    'only_post'      => ['Only POST requests are allowed.', 'Dozwolone tylko POST.'],
+    'no_bin'         => ['%s not found. Reinstall the plugin.', 'Nie znaleziono %s. Zainstaluj plugin ponownie.'],
+    'no_ctrl'        => ['hpssacli did not find any Smart Array controller.', 'hpssacli nie znalazł żadnego kontrolera Smart Array.'],
+    'bad_slot'       => ['Invalid controller slot.', 'Nieprawidłowy slot kontrolera.'],
+    'bad_params'     => ['Invalid parameters.', 'Nieprawidłowe parametry.'],
+    'led_done'       => ['LED %s: %s', 'Dioda %s: %s'],
+    'bad_drive'      => ['Invalid drive.', 'Nieprawidłowy dysk.'],
+    'no_serial'      => ['Could not read the serial number.', 'Nie udało się odczytać numeru seryjnego.'],
+    'no_cciss'       => ['Drive not found via cciss (the controller needs at least one visible volume).', 'Nie znaleziono dysku przez cciss (kontroler musi mieć przynajmniej jeden widoczny wolumen).'],
+    'not_unassigned' => ['Drive %s is not unassigned.', 'Dysk %s nie jest nieprzypisany (unassigned).'],
+    'create_err'     => ["Error creating volume:\n%s", "Błąd tworzenia wolumenu:\n%s"],
+    'created'        => ['Created LD %s (RAID0) from %s', 'Utworzono LD %s (RAID0) z %s'],
+    'created_nodev'  => [' (device not visible yet – refresh in a moment)', ' (urządzenie jeszcze niewidoczne – odśwież za chwilę)'],
+    'bad_ld'         => ['Invalid volume number.', 'Nieprawidłowy numer wolumenu.'],
+    'confirm_bad'    => ['Confirmation does not match the volume number.', 'Potwierdzenie nie zgadza się z numerem wolumenu.'],
+    'ld_missing'     => ['Volume %s does not exist.', 'Wolumen %s nie istnieje.'],
+    'refused'        => ['Refused: %s is %s.', 'Odmowa: %s jest %s.'],
+    'in_unraid'      => ['assigned in Unraid as %s', 'przypisany w Unraid jako %s'],
+    'mounted'        => ['mounted', 'zamontowany'],
+    'used_by'        => ['used by %s', 'używany przez %s'],
+    'delete_err'     => ["Error deleting volume:\n%s", "Błąd usuwania:\n%s"],
+    'deleted'        => ['Deleted LD %s', 'Usunięto LD %s'],
+    'cache_done'     => ['LD %s cache: %s', 'Cache LD %s: %s'],
+    'no_data'        => ['No data.', 'Brak danych.'],
+    'saved'          => ['Settings saved.', 'Zapisano ustawienia.'],
+    'set_broker'     => ['Set and save the broker address first.', 'Najpierw ustaw i zapisz adres brokera.'],
+    'mqtt_test_ok'   => ['Connected to %s and published %s/test', 'Połączono z %s i wysłano %s/test'],
+    'baseline_reset' => ['SMART counter baseline reset – it will be recorded on the next check.', 'Zresetowano punkt odniesienia liczników SMART – zostanie ustawiony przy następnym sprawdzeniu.'],
+    'unknown_action' => ['Unknown action.', 'Nieznana akcja.'],
+    'bay_state'      => ['bay %s: %s', 'kieszeń %s: %s'],
+    /* problems */
+    'pr_ctrl'        => ['Controller slot %s: %s', 'Kontroler slot %s: %s'],
+    'pr_cache'       => ['Controller cache: %s', 'Cache kontrolera: %s'],
+    'pr_batt'        => ['Cache battery: %s', 'Bateria cache: %s'],
+    'pr_ld'          => ['LD %s (%s): %s', 'LD %s (%s): %s'],
+    'pr_label'       => ['Bay %s (%s)', 'Kieszeń %s (%s)'],
+    'pr_state'       => ['state: %s', 'stan: %s'],
+    'pr_pending'     => ['pending sectors: %s', 'oczekujące sektory: %s'],
+    'pr_offline'     => ['uncorrectable sectors: %s', 'nienaprawialne sektory: %s'],
+    'pr_increase'    => ['%s increased: %s → %s', '%s wzrosły: %s → %s'],
+    'c_defects'      => ['grown defects', 'grown defects'],
+    'c_realloc'      => ['reallocated sectors', 'realokowane sektory'],
+    'c_uncorr'       => ['uncorrected errors', 'błędy nienaprawione'],
+    'pr_temp'        => ['temperature %s °C (threshold %s °C)', 'temperatura %s °C (próg %s °C)'],
+    'mqtt_conn_fail' => ['Connection to %s:%s failed: %s', 'Połączenie z %s:%s nieudane: %s'],
+    'mqtt_rejected'  => ['Broker rejected the connection', 'Broker odrzucił połączenie'],
+    'mqtt_noack'     => [' (no CONNACK)', ' (brak CONNACK)'],
+    'mqtt_rc1'       => ['unacceptable protocol version', 'zła wersja protokołu'],
+    'mqtt_rc2'       => ['client identifier rejected', 'odrzucony identyfikator'],
+    'mqtt_rc3'       => ['server unavailable', 'serwer niedostępny'],
+    'mqtt_rc4'       => ['bad username or password', 'zły login lub hasło'],
+    'mqtt_rc5'       => ['not authorized', 'brak autoryzacji'],
+    'mqtt_rcx'       => ['code %s', 'kod %s'],
+    'ntf_problem'    => ['P410: problem detected (%s)', 'P410: wykryto problem (%s)'],
+    'ntf_resolved'   => ['P410: problems resolved', 'P410: problemy ustąpiły'],
+    'ha_problem'     => ['Problem', 'Problem'],
+    'ha_controller'  => ['Controller', 'Kontroler'],
+    'ha_cache'       => ['Cache', 'Cache'],
+    'ha_battery'     => ['Cache battery', 'Bateria cache'],
+    'ha_maxtemp'     => ['Max drive temperature', 'Maks. temperatura dysków'],
+    'ha_bay_temp'    => ['Bay %s temperature', 'Kieszeń %s temperatura'],
+    'ha_bay_status'  => ['Bay %s status', 'Kieszeń %s stan'],
+    /* GUI */
+    'js_refresh'     => ['Refresh', 'Odśwież'],
+    'js_loading'     => ['Loading…', 'Ładowanie…'],
+    'js_reading'     => ['Reading controller…', 'Odczyt kontrolera…'],
+    'js_read_at'     => ['Read at: %s', 'Odczytano: %s'],
+    'js_bad_resp'    => ['Invalid server response:', 'Błędna odpowiedź serwera:'],
+    'js_error'       => ['Error', 'Błąd'],
+    'js_no_drives'   => ['No drives', 'Brak dysków'],
+    'js_bay'         => ['Bay', 'Kieszeń'],
+    'js_drive'       => ['Drive', 'Dysk'],
+    'js_type'        => ['Type', 'Typ'],
+    'js_size'        => ['Size', 'Rozmiar'],
+    'js_model'       => ['Model', 'Model'],
+    'js_serial'      => ['Serial', 'Nr seryjny'],
+    'js_temp'        => ['Temp.', 'Temp.'],
+    'js_state'       => ['State', 'Stan'],
+    'js_volume'      => ['Volume', 'Wolumen'],
+    'js_cache'       => ['Cache', 'Cache'],
+    'js_unraid'      => ['Unraid', 'Unraid'],
+    'js_actions'     => ['Actions', 'Akcje'],
+    'js_detached'    => ['detached', 'odłączone'],
+    'js_detached_t'  => ['Device detached from the OS', 'Urządzenie odłączone od systemu'],
+    'js_led_on'      => ['LED on', 'LED wł.'],
+    'js_led_on_t'    => ['Turn the locate LED on', 'Zapal diodę'],
+    'js_led_off'     => ['off', 'wył.'],
+    'js_led_off_t'   => ['Turn the locate LED off', 'Zgaś diodę'],
+    'js_create'      => ['Create RAID0', 'Utwórz RAID0'],
+    'js_delete'      => ['Delete LD', 'Usuń LD'],
+    'js_in_unraid'   => ['The drive is assigned in Unraid', 'Dysk jest przypisany w Unraid'],
+    'js_cache_on'    => ['Enable cache', 'Włącz cache'],
+    'js_cache_off_t' => ['Controller cache is disabled (%s) – replace the battery first', 'Cache kontrolera jest wyłączony (%s) – najpierw wymień baterię'],
+    'js_smart_read'  => ['Reading SMART %s (the first time may take a few seconds)…', 'Odczyt SMART %s (pierwszy raz może potrwać kilkanaście sekund)…'],
+    'js_close'       => ['Close', 'Zamknij'],
+    'js_create_q'    => ["Create a new RAID0 volume from drive %s?\nData on this drive may be lost.", "Utworzyć nowy wolumen RAID0 z dysku %s?\nDane na tym dysku mogą zostać utracone."],
+    'js_creating'    => ['Creating volume…', 'Tworzenie wolumenu…'],
+    'js_delete_q'    => ["DELETE volume LD %s%s.\nAll data on this drive will become inaccessible.\n\nTo confirm, type the volume number: %s", "USUNIĘCIE wolumenu LD %s%s.\nWszystkie dane na tym dysku będą niedostępne.\n\nAby potwierdzić, wpisz numer wolumenu: %s"],
+    'js_cancelled'   => ['Cancelled – the number does not match.', 'Anulowano – numer się nie zgadza.'],
+    'js_deleting'    => ['Deleting volume…', 'Usuwanie wolumenu…'],
+    'js_mon_title'   => ['SMART monitoring & MQTT', 'Monitoring SMART i MQTT'],
+    'js_last'        => ['Last check:', 'Ostatnie sprawdzenie:'],
+    'js_never'       => ['never', 'brak'],
+    'js_problems'    => ['PROBLEMS: %s', 'PROBLEMY: %s'],
+    'f_lang'         => ['Language', 'Język'],
+    'f_lang_auto'    => ['Automatic (Unraid)', 'Automatyczny (Unraid)'],
+    'f_mon'          => ['Periodic check', 'Cykliczne sprawdzanie'],
+    'f_on'           => ['Enabled', 'Włączone'],
+    'f_off'          => ['Disabled', 'Wyłączone'],
+    'f_yes'          => ['Yes', 'Tak'],
+    'f_no'           => ['No', 'Nie'],
+    'f_interval'     => ['Interval (minutes)', 'Co ile minut'],
+    'f_temp'         => ['Drive temperature threshold (°C)', 'Próg temperatury dysku (°C)'],
+    'f_standby'      => ["Don't wake sleeping drives", 'Nie budź uśpionych dysków'],
+    'f_ign_cache'    => ['Ignore disabled controller cache', 'Ignoruj wyłączony cache kontrolera'],
+    'f_ign_batt'     => ['Ignore cache battery state', 'Ignoruj stan baterii cache'],
+    'f_notify'       => ['Unraid notifications', 'Powiadomienia Unraid'],
+    'f_mqtt'         => ['MQTT', 'MQTT'],
+    'f_host'         => ['Broker (IP / host)', 'Broker (IP / host)'],
+    'f_host_ph'      => ['e.g. 192.168.1.10', 'np. 192.168.1.10'],
+    'f_port'         => ['Port', 'Port'],
+    'f_user'         => ['Username', 'Użytkownik'],
+    'f_pass'         => ['Password', 'Hasło'],
+    'f_topic'        => ['Base topic', 'Temat bazowy'],
+    'f_disc'         => ['Home Assistant discovery', 'Home Assistant discovery'],
+    'f_disc_prefix'  => ['Discovery prefix', 'Prefiks discovery'],
+    'b_save'         => ['Save', 'Zapisz'],
+    'b_test'         => ['Test MQTT', 'Test MQTT'],
+    'b_check'        => ['Check now', 'Sprawdź teraz'],
+    'b_baseline'     => ['Accept current SMART counters', 'Akceptuj obecne liczniki SMART'],
+    'b_baseline_t'   => ['Use the current SMART counters as the reference', 'Przyjmij obecne liczniki SMART jako punkt odniesienia'],
+    'js_test_run'    => ['Testing MQTT (save your changes first)…', 'Test MQTT (najpierw zapisz zmiany)…'],
+    'js_checking'    => ['Checking all drives (SMART) – this can take up to a minute…', 'Sprawdzanie wszystkich dysków (SMART) – może potrwać do minuty…'],
+    'js_check_done'  => ['Check finished.', 'Sprawdzenie zakończone.'],
+    'js_baseline_q'  => ['Accept the current SMART counters (reallocations, defects, errors) as normal?', 'Przyjąć obecne wartości liczników SMART (realokacje, defekty, błędy) jako normalne?'],
+    /* dashboard */
+    'd_open'         => ['Open Smart Array P410', 'Otwórz Smart Array P410'],
+    'd_no_resp'      => ['No response', 'Brak odpowiedzi'],
+    'd_all_ok'       => ['All OK', 'Wszystko OK'],
+    'd_attention'    => ['Needs attention', 'Wymaga uwagi'],
+    'd_controller'   => ['Controller', 'Kontroler'],
+    'd_cache'        => ['Cache', 'Cache'],
+    'd_battery'      => ['Battery', 'Bateria'],
+    'd_drives'       => ['Drives / volumes', 'Dyski / wolumeny'],
+    'd_maxtemp'      => ['Max temperature', 'Maks. temperatura'],
+    'd_ignored'      => ['ignored', 'ignorowane'],
+  ];
+}
+
+function p410_t(string $key, ...$args): string {
+  static $s = null; $s ??= p410_strings();
+  $txt = $s[$key][p410_lang() === 'pl' ? 1 : 0] ?? $key;
+  return $args ? vsprintf($txt, $args) : $txt;
+}
+
+/* Słownik dla JS (tylko bieżący język) */
+function p410_js_dict(): array {
+  $i = p410_lang() === 'pl' ? 1 : 0; $o = [];
+  foreach (p410_strings() as $k => $v) $o[$k] = $v[$i];
+  return $o;
+}
+]]></INLINE>
+</FILE>
+<FILE Name="/usr/local/emhttp/plugins/p410mgr/include/lib.php">
+<INLINE><![CDATA[
+<?php
+require_once __DIR__ . '/i18n.php';
+/* p410mgr — library: running hpssacli and parsing its output */
+
+const P410_BIN   = '/usr/local/sbin/hpssacli';
+const P410_CACHE = '/tmp/p410mgr_cciss.json';
+
+function p410_run(string $args, ?int &$rc = null): string {
+  $out = [];
+  exec(P410_BIN . ' ' . $args . ' 2>&1', $out, $rc);
+  return implode("\n", $out);
+}
+
+function p410_valid_slot($s): bool { return is_string($s) && preg_match('/^\d{1,2}$/', $s) === 1; }
+function p410_valid_pd($s): bool   { return is_string($s) && preg_match('/^\d{1,2}[IEC]:\d{1,2}:\d{1,3}$/', $s) === 1; }
+function p410_valid_ld($s): bool   { return is_string($s) && preg_match('/^\d{1,3}$/', $s) === 1; }
+
+/* "Smart Array P410 in Slot 3 (sn: XXX)" -> [ ['slot'=>'3','model'=>'Smart Array P410'] ] */
+function p410_parse_controllers(string $txt): array {
+  $res = [];
+  if (preg_match_all('/^\s*(.+?) in Slot (\d+)/m', $txt, $m, PREG_SET_ORDER)) {
+    foreach ($m as $x) $res[] = ['slot' => $x[2], 'model' => trim($x[1])];
+  }
+  return $res;
+}
+
+/* Simple first-level "Key: Value" pairs (ctrl show detail) */
+function p410_parse_kv(string $txt): array {
+  $kv = [];
+  foreach (explode("\n", $txt) as $line) {
+    if (preg_match('/^\s*([^:]{2,60}?):\s+(.*\S)\s*$/', $line, $m)) {
+      $k = trim($m[1]);
+      if (!isset($kv[$k])) $kv[$k] = trim($m[2]);
+    }
+  }
+  return $kv;
+}
+
+/* ctrl slot=X show config -> drives with array/LD assignment + unassigned */
+function p410_parse_config(string $txt): array {
+  $arrays = []; $pds = []; $lds = [];
+  $curArray = null; $curLd = null; $unassigned = false;
+  foreach (explode("\n", $txt) as $line) {
+    $t = trim($line);
+    if ($t === '') continue;
+    if (preg_match('/^array (\S+)\s*\((.*)\)/', $t, $m)) {
+      $curArray = $m[1]; $curLd = null; $unassigned = false;
+      $arrays[$curArray] = ['name' => $curArray, 'info' => $m[2], 'lds' => []];
+      continue;
+    }
+    if ($t === 'unassigned') { $unassigned = true; $curArray = null; $curLd = null; continue; }
+    if (preg_match('/^logicaldrive (\d+)\s*\(([^,]+),\s*([^,]+),\s*([^)]+)\)/', $t, $m)) {
+      $curLd = $m[1];
+      $lds[$curLd] = ['ld' => $curLd, 'size' => trim($m[2]), 'raid' => trim($m[3]),
+                      'status' => trim($m[4]), 'array' => $curArray, 'pds' => []];
+      if ($curArray !== null) $arrays[$curArray]['lds'][] = $curLd;
+      continue;
+    }
+    if (preg_match('/^physicaldrive (\S+)\s*\((.*)\)/', $t, $m)) {
+      $pd = $m[1];
+      $parts = array_map('trim', explode(',', $m[2]));
+      $bay = null;
+      if (preg_match('/bay (\d+)/', $m[2], $b)) $bay = (int)$b[1];
+      $n = count($parts);
+      $pds[$pd] = [
+        'pd'         => $pd,
+        'bay'        => $bay,
+        'type'       => $n >= 3 ? $parts[$n - 3] : '',
+        'size'       => $n >= 2 ? $parts[$n - 2] : '',
+        'status'     => $n >= 1 ? $parts[$n - 1] : '',
+        'array'      => $unassigned ? null : $curArray,
+        'unassigned' => $unassigned,
+        'lds'        => [],
+      ];
+      if (!$unassigned && $curArray !== null) {
+        foreach ($arrays[$curArray]['lds'] as $l) { $lds[$l]['pds'][] = $pd; $pds[$pd]['lds'][] = $l; }
+      }
+      continue;
+    }
+  }
+  return ['arrays' => $arrays, 'lds' => $lds, 'pds' => $pds];
+}
+
+/* Bloki "Logical Drive: N" z ld all show detail */
+function p410_parse_ld_detail(string $txt): array {
+  $res = []; $cur = null;
+  foreach (explode("\n", $txt) as $line) {
+    if (preg_match('/^\s*Logical Drive:\s*(\d+)/', $line, $m)) { $cur = $m[1]; $res[$cur] = []; continue; }
+    if ($cur !== null && preg_match('/^\s*([^:]{2,60}?):\s+(.*\S)\s*$/', $line, $m)) {
+      $k = trim($m[1]); if (!isset($res[$cur][$k])) $res[$cur][$k] = trim($m[2]);
+    }
+  }
+  return $res;
+}
+
+/* Bloki "physicaldrive X" z pd all show detail */
+function p410_parse_pd_detail(string $txt): array {
+  $res = []; $cur = null;
+  foreach (explode("\n", $txt) as $line) {
+    if (preg_match('/^\s*physicaldrive (\S+)\s*$/', $line, $m)) { $cur = $m[1]; $res[$cur] = []; continue; }
+    if ($cur !== null && preg_match('/^\s*([^:]{2,60}?):\s+(.*\S)\s*$/', $line, $m)) {
+      $k = trim($m[1]); if (!isset($res[$cur][$k])) $res[$cur][$k] = trim($m[2]);
+    }
+  }
+  return $res;
+}
+
+/* Unraid assignments: device (sdX) -> slot name (disk1, parity, cache...) */
+function p410_unraid_assignments(): array {
+  $map = [];
+  $ini = '/var/local/emhttp/disks.ini';
+  if (is_readable($ini)) {
+    $disks = @parse_ini_file($ini, true) ?: [];
+    foreach ($disks as $name => $d) {
+      $dev = $d['device'] ?? '';
+      if ($dev !== '' && ($d['type'] ?? '') !== 'Flash') $map[$dev] = $d['name'] ?? $name;
+    }
+  }
+  return $map;
+}
+
+function p410_dev_in_use(string $dev): ?string {
+  $dev = basename($dev);
+  if ($dev === '' || !preg_match('/^sd[a-z]+$/', $dev)) return null;
+  $assign = p410_unraid_assignments();
+  if (isset($assign[$dev])) return p410_t('in_unraid', $assign[$dev]);
+  $mounts = @file_get_contents('/proc/mounts') ?: '';
+  if (preg_match('#^/dev/' . preg_quote($dev, '#') . '\d*\s#m', $mounts)) return p410_t('mounted');
+  $holders = glob("/sys/block/$dev/holders/*") ?: [];
+  if ($holders) return p410_t('used_by', implode(', ', array_map('basename', $holders)));
+  return null;
+}
+
+/* Full state of all controllers */
+function p410_status(): array {
+  if (!is_executable(P410_BIN)) return ['error' => p410_t('no_bin', P410_BIN)];
+  $ctrls = p410_parse_controllers(p410_run('ctrl all show'));
+  if (!$ctrls) return ['error' => p410_t('no_ctrl')];
+  $assign = p410_unraid_assignments();
+  foreach ($ctrls as &$c) {
+    $s = $c['slot'];
+    $c['detail'] = p410_parse_kv(p410_run("ctrl slot=$s show detail"));
+    $cfg  = p410_parse_config(p410_run("ctrl slot=$s show config"));
+    $ldd  = p410_parse_ld_detail(p410_run("ctrl slot=$s ld all show detail"));
+    $pdd  = p410_parse_pd_detail(p410_run("ctrl slot=$s pd all show detail"));
+    foreach ($cfg['lds'] as $n => &$ld) {
+      $d = $ldd[$n] ?? [];
+      $dev = $d['Disk Name'] ?? '';
+      $ld['dev']     = $dev;
+      $ld['caching'] = $d['Caching'] ?? '';
+      $ld['unraid']  = $dev !== '' ? ($assign[basename($dev)] ?? '') : '';
+      $ld['present'] = $dev !== '' && file_exists($dev);
+    }
+    unset($ld);
+    foreach ($cfg['pds'] as $p => &$pd) {
+      $d = $pdd[$p] ?? [];
+      $pd['model']  = preg_replace('/\s+/', ' ', $d['Model'] ?? '');
+      $pd['serial'] = $d['Serial Number'] ?? '';
+      $pd['temp']   = $d['Current Temperature (C)'] ?? '';
+      $pd['fw']     = $d['Firmware Revision'] ?? '';
+      $pd['rpm']    = $d['Rotational Speed'] ?? '';
+      $pd['link']   = $d['PHY Transfer Rate'] ?? '';
+      if (!empty($d['Status'])) $pd['status'] = $d['Status'];
+    }
+    unset($pd);
+    $c['lds'] = array_values($cfg['lds']);
+    $pds = array_values($cfg['pds']);
+    usort($pds, fn($a, $b) => ($a['bay'] ?? 999) <=> ($b['bay'] ?? 999));
+    $c['pds'] = $pds;
+  }
+  unset($c);
+  return ['controllers' => $ctrls];
+}
+
+/* Find the cciss,N index for a serial number (cached in /tmp) */
+function p410_cciss_index(string $slot, string $serial): ?array {
+  $cache = @json_decode(@file_get_contents(P410_CACHE) ?: '[]', true) ?: [];
+  $ldd = p410_parse_ld_detail(p410_run("ctrl slot=$slot ld all show detail"));
+  $dev = null;
+  foreach ($ldd as $d) { $n = $d['Disk Name'] ?? ''; if ($n !== '' && file_exists($n)) { $dev = $n; break; } }
+  if ($dev === null) return null;
+  if (isset($cache[$slot][$serial])) return ['dev' => $dev, 'n' => $cache[$slot][$serial]];
+  for ($i = 0; $i < 32; $i++) {
+    $o = [];
+    exec('smartctl -i -d cciss,' . $i . ' ' . escapeshellarg($dev) . ' 2>/dev/null', $o);
+    foreach ($o as $line) {
+      if (preg_match('/^Serial number:\s*(\S+)/i', $line, $m)) {
+        $cache[$slot][$m[1]] = $i;
+      }
+    }
+  }
+  @file_put_contents(P410_CACHE, json_encode($cache));
+  return isset($cache[$slot][$serial]) ? ['dev' => $dev, 'n' => $cache[$slot][$serial]] : null;
+}
+
+function p410_rescan_hpsa(): void {
+  foreach (glob('/sys/class/scsi_host/host*') ?: [] as $h) {
+    if (trim(@file_get_contents("$h/proc_name") ?: '') === 'hpsa') @file_put_contents("$h/scan", "- - -");
+  }
+}
+]]></INLINE>
+</FILE>
+<FILE Name="/usr/local/emhttp/plugins/p410mgr/include/exec.php">
+<INLINE><![CDATA[
+<?php
+/* p410mgr — AJAX backend (POST; CSRF token is checked by Unraid) */
+require_once __DIR__ . '/monitor.php';
+header('Content-Type: application/json; charset=utf-8');
+
+function p410_out(array $a): void { echo json_encode($a, JSON_UNESCAPED_UNICODE); exit; }
+function p410_fail(string $msg): void { p410_out(['ok' => false, 'msg' => $msg]); }
+
+if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') p410_fail(p410_t('only_post'));
+if (!is_executable(P410_BIN)) p410_fail(p410_t('no_bin', P410_BIN));
+
+$action = $_POST['action'] ?? '';
+$slot   = $_POST['slot'] ?? '';
+$noSlot = ['status', 'summary', 'getcfg', 'savecfg', 'testmqtt', 'runcheck', 'resetbaseline', 'laststate'];
+if (!in_array($action, $noSlot, true) && !p410_valid_slot($slot)) p410_fail(p410_t('bad_slot'));
+
+switch ($action) {
+
+  case 'status':
+    p410_out(['ok' => true] + p410_status());
+
+  case 'summary':
+    $st = p410_status();
+    if (isset($st['error'])) p410_out(['ok' => false, 'msg' => $st['error']]);
+    $mcfg = p410_cfg_load();
+    $sum = [];
+    foreach ($st['controllers'] as $c) {
+      $d = $c['detail'];
+      $bad = []; $temps = []; $unassigned = 0;
+      foreach ($c['pds'] as $p) {
+        if (strcasecmp($p['status'], 'OK') !== 0) $bad[] = p410_t('bay_state', $p['bay'], $p['status']);
+        if ($p['unassigned']) $unassigned++;
+        if (is_numeric($p['temp'])) $temps[] = (int)$p['temp'];
+      }
+      foreach ($c['lds'] as $l) if (strcasecmp($l['status'], 'OK') !== 0) $bad[] = "LD {$l['ld']}: {$l['status']}";
+      $sum[] = [
+        'slot' => $c['slot'], 'model' => $c['model'],
+        'ctrl' => $d['Controller Status'] ?? '?', 'cache' => $d['Cache Status'] ?? '?',
+        'battery' => $d['Battery/Capacitor Status'] ?? '—', 'fw' => $d['Firmware Version'] ?? '',
+        'pds' => count($c['pds']), 'lds' => count($c['lds']), 'unassigned' => $unassigned,
+        'ign_cache' => $mcfg['IGNORE_CACHE'] === 'yes', 'ign_battery' => $mcfg['IGNORE_BATTERY'] === 'yes',
+        'tmax' => $temps ? max($temps) : null, 'bad' => $bad,
+      ];
+    }
+    p410_out(['ok' => true, 'controllers' => $sum]);
+
+  case 'led':
+    $pd = $_POST['pd'] ?? ''; $state = $_POST['state'] ?? '';
+    if (!p410_valid_pd($pd) || !in_array($state, ['on', 'off'], true)) p410_fail(p410_t('bad_params'));
+    $o = p410_run("ctrl slot=$slot pd $pd modify led=$state", $rc);
+    p410_out(['ok' => $rc === 0, 'msg' => $rc === 0 ? p410_t('led_done', $pd, $state) : $o]);
+
+  case 'smart':
+    $pd = $_POST['pd'] ?? '';
+    if (!p410_valid_pd($pd)) p410_fail(p410_t('bad_drive'));
+    $pdd = p410_parse_pd_detail(p410_run("ctrl slot=$slot pd $pd show detail"));
+    $serial = $pdd[$pd]['Serial Number'] ?? '';
+    if ($serial === '') p410_fail(p410_t('no_serial'));
+    $idx = p410_cciss_index($slot, $serial);
+    if ($idx === null) p410_fail(p410_t('no_cciss'));
+    $o = [];
+    exec('smartctl -a -d cciss,' . (int)$idx['n'] . ' ' . escapeshellarg($idx['dev']) . ' 2>&1', $o);
+    p410_out(['ok' => true, 'msg' => "cciss,{$idx['n']} @ {$idx['dev']}", 'text' => implode("\n", $o)]);
+
+  case 'create':
+    $pd = $_POST['pd'] ?? '';
+    if (!p410_valid_pd($pd)) p410_fail(p410_t('bad_drive'));
+    $cfg = p410_parse_config(p410_run("ctrl slot=$slot show config"));
+    if (empty($cfg['pds'][$pd]['unassigned'])) p410_fail(p410_t('not_unassigned', $pd));
+    $before = array_keys($cfg['lds']);
+    $o = p410_run("ctrl slot=$slot create type=ld drives=$pd raid=0", $rc);
+    if ($rc !== 0) p410_fail(p410_t('create_err', $o));
+    sleep(2);
+    $ldd = p410_parse_ld_detail(p410_run("ctrl slot=$slot ld all show detail"));
+    $new = array_values(array_diff(array_keys($ldd), $before));
+    $ld  = $new[0] ?? null;
+    $dev = $ld !== null ? ($ldd[$ld]['Disk Name'] ?? '') : '';
+    if ($dev === '' || !file_exists($dev)) {
+      p410_rescan_hpsa(); sleep(2);
+      $ldd = p410_parse_ld_detail(p410_run("ctrl slot=$slot ld all show detail"));
+      $dev = $ld !== null ? ($ldd[$ld]['Disk Name'] ?? '') : '';
+    }
+    p410_out(['ok' => true, 'msg' => p410_t('created', $ld, $pd) . ($dev ? " → $dev" : p410_t('created_nodev'))]);
+
+  case 'delete':
+    $ld = $_POST['ld'] ?? ''; $confirm = $_POST['confirm'] ?? '';
+    if (!p410_valid_ld($ld)) p410_fail(p410_t('bad_ld'));
+    if ($confirm !== $ld) p410_fail(p410_t('confirm_bad'));
+    $ldd = p410_parse_ld_detail(p410_run("ctrl slot=$slot ld all show detail"));
+    if (!isset($ldd[$ld])) p410_fail(p410_t('ld_missing', $ld));
+    $dev = $ldd[$ld]['Disk Name'] ?? '';
+    if ($dev !== '') {
+      $use = p410_dev_in_use($dev);
+      if ($use !== null) p410_fail(p410_t('refused', $dev, $use));
+    }
+    $o = p410_run("ctrl slot=$slot ld $ld delete forced", $rc);
+    if ($rc !== 0) p410_fail(p410_t('delete_err', $o));
+    @unlink(P410_CACHE);
+    p410_out(['ok' => true, 'msg' => p410_t('deleted', $ld) . ($dev ? " ($dev)" : '')]);
+
+  case 'cache':
+    $ld = $_POST['ld'] ?? ''; $state = $_POST['state'] ?? '';
+    if (!p410_valid_ld($ld) || !in_array($state, ['enable', 'disable'], true)) p410_fail(p410_t('bad_params'));
+    $o = p410_run("ctrl slot=$slot ld $ld modify arrayaccelerator=$state", $rc);
+    p410_out(['ok' => $rc === 0, 'msg' => $rc === 0 ? p410_t('cache_done', $ld, $state) : $o]);
+
+
+  case 'getcfg':
+    $cfg = p410_cfg_load(); $cfg['MQTT_PASS'] = $cfg['MQTT_PASS'] !== '' ? '********' : '';
+    p410_out(['ok' => true, 'cfg' => $cfg]);
+
+  case 'savecfg':
+    $in = $_POST['cfg'] ?? [];
+    if (!is_array($in)) p410_fail(p410_t('no_data'));
+    if (($in['MQTT_PASS'] ?? '') === '********') unset($in['MQTT_PASS']);
+    p410_cfg_save($in);
+    p410_out(['ok' => true, 'msg' => p410_t('saved')]);
+
+  case 'testmqtt':
+    $cfg = p410_cfg_load();
+    if ($cfg['MQTT_HOST'] === '') p410_fail(p410_t('set_broker'));
+    $err = null;
+    $ok = p410_mqtt_publish($cfg, [[$cfg['MQTT_TOPIC'] . '/test', 'p410mgr test ' . date('c'), false]], $err);
+    p410_out(['ok' => $ok, 'msg' => $ok ? p410_t('mqtt_test_ok', $cfg['MQTT_HOST'], $cfg['MQTT_TOPIC']) : $err]);
+
+  case 'runcheck':
+    $r = p410_run_check(true);
+    p410_out(['ok' => true, 'state' => $r]);
+
+  case 'laststate':
+    $r = @json_decode(@file_get_contents(P410_STATE) ?: 'null', true);
+    p410_out(['ok' => true, 'state' => $r]);
+
+  case 'resetbaseline':
+    p410_baseline_reset();
+    p410_out(['ok' => true, 'msg' => p410_t('baseline_reset')]);
+
+  default:
+    p410_fail(p410_t('unknown_action'));
+}
+]]></INLINE>
+</FILE>
+<FILE Name="/usr/local/emhttp/plugins/p410mgr/include/monitor.php">
+<INLINE><![CDATA[
+<?php
+/* p410mgr — monitoring: config, SMART, problem detection, MQTT, HA discovery */
+require_once __DIR__ . '/lib.php';
+
+const P410_CFG_DIR  = '/boot/config/plugins/p410mgr';
+const P410_CFG      = P410_CFG_DIR . '/p410mgr.cfg';
+const P410_CRON     = P410_CFG_DIR . '/p410mgr.cron';
+const P410_BASELINE = P410_CFG_DIR . '/smart_baseline.json';
+const P410_STATE    = '/tmp/p410mgr_state.json';
+
+function p410_cfg_defaults(): array {
+  return [
+    'MON_ENABLED' => 'no', 'INTERVAL' => '60', 'TEMP_WARN' => '45', 'LANG' => 'auto', 'SKIP_STANDBY' => 'yes', 'IGNORE_CACHE' => 'no', 'IGNORE_BATTERY' => 'no',
+    'NOTIFY' => 'yes',
+    'MQTT_ENABLED' => 'no', 'MQTT_HOST' => '', 'MQTT_PORT' => '1883', 'MQTT_USER' => '', 'MQTT_PASS' => '',
+    'MQTT_TOPIC' => 'unraid/p410', 'MQTT_DISCOVERY' => 'yes', 'MQTT_DISCOVERY_PREFIX' => 'homeassistant',
+  ];
+}
+
+function p410_cfg_load(): array {
+  $cfg = p410_cfg_defaults();
+  if (is_readable(P410_CFG)) {
+    $ini = @parse_ini_file(P410_CFG, false, INI_SCANNER_RAW) ?: [];
+    foreach ($ini as $k => $v) if (array_key_exists($k, $cfg)) $cfg[$k] = $v;
+  }
+  return $cfg;
+}
+
+function p410_cfg_save(array $in): array {
+  $cfg = p410_cfg_load();
+  foreach (p410_cfg_defaults() as $k => $_) if (isset($in[$k])) $cfg[$k] = str_replace(["\n", "\r", '"'], '', trim((string)$in[$k]));
+  $cfg['INTERVAL']  = (string)max(5, min(1440, (int)$cfg['INTERVAL']));
+  $cfg['TEMP_WARN'] = (string)max(30, min(70, (int)$cfg['TEMP_WARN']));
+  if (!in_array($cfg['LANG'], ['auto', 'en', 'pl'], true)) $cfg['LANG'] = 'auto';
+  $cfg['MQTT_PORT'] = (string)max(1, min(65535, (int)$cfg['MQTT_PORT']));
+  $cfg['MQTT_TOPIC'] = trim(preg_replace('#[^A-Za-z0-9_/\-]#', '', $cfg['MQTT_TOPIC']), '/') ?: 'unraid/p410';
+  $cfg['MQTT_DISCOVERY_PREFIX'] = trim(preg_replace('#[^A-Za-z0-9_/\-]#', '', $cfg['MQTT_DISCOVERY_PREFIX']), '/') ?: 'homeassistant';
+  @mkdir(P410_CFG_DIR, 0755, true);
+  $txt = '';
+  foreach ($cfg as $k => $v) $txt .= $k . '="' . $v . "\"\n";
+  file_put_contents(P410_CFG, $txt);
+  p410_cron_update($cfg);
+  return $cfg;
+}
+
+function p410_cron_update(array $cfg): void {
+  if ($cfg['MON_ENABLED'] === 'yes') {
+    $m = (int)$cfg['INTERVAL'];
+    $sched = $m < 60 ? "*/$m * * * *" : ($m % 60 === 0 && $m < 1440 ? '7 */' . ($m / 60) . ' * * *' : '7 3 * * *');
+    file_put_contents(P410_CRON, "# Generated by p410mgr\n$sched /usr/bin/php /usr/local/emhttp/plugins/p410mgr/scripts/check.php >/dev/null 2>&1\n");
+  } else {
+    @unlink(P410_CRON);
+  }
+  if (is_executable('/usr/local/sbin/update_cron')) exec('/usr/local/sbin/update_cron');
+}
+
+/* ---------- SMART ---------- */
+
+function p410_cciss_map(string $slot, string $dev): array {
+  $map = [];
+  for ($i = 0; $i < 32; $i++) {
+    $o = [];
+    exec('smartctl -i -d cciss,' . $i . ' ' . escapeshellarg($dev) . ' 2>/dev/null', $o);
+    foreach ($o as $line) if (preg_match('/^Serial number:\s*(\S+)/i', $line, $m)) $map[$m[1]] = $i;
+  }
+  @file_put_contents(P410_CACHE, json_encode([$slot => $map]));
+  return $map;
+}
+
+function p410_parse_smart(string $txt): array {
+  $r = ['health' => null, 'temp' => null, 'defects' => null, 'uncorrected' => null,
+        'realloc' => null, 'pending' => null, 'offline_unc' => null, 'hours' => null];
+  if (preg_match('/SMART Health Status:\s*(.+)/', $txt, $m)) $r['health'] = trim($m[1]);
+  if (preg_match('/overall-health self-assessment test result:\s*(\S+)/', $txt, $m)) $r['health'] = trim($m[1]);
+  if (preg_match('/Current Drive Temperature:\s*(\d+)/', $txt, $m)) $r['temp'] = (int)$m[1];
+  if (preg_match('/Elements in grown defect list:\s*(\d+)/', $txt, $m)) $r['defects'] = (int)$m[1];
+  if (preg_match('/Accumulated power on time, hours:minutes\s*(\d+)/', $txt, $m)) $r['hours'] = (int)$m[1];
+  if (preg_match_all('/^(read|write|verify):\s+(?:\S+\s+){5}\S+\s+(\d+)\s*$/m', $txt, $mm)) $r['uncorrected'] = array_sum(array_map('intval', $mm[2]));
+  /* ATA */
+  $attr = function (string $name) use ($txt) {
+    return preg_match('/^\s*\d+\s+' . $name . '\s+.*\s(\d+)(?:\s+\(.*\))?\s*$/m', $txt, $m) ? (int)$m[1] : null;
+  };
+  $r['realloc']     = $attr('Reallocated_Sector_Ct');
+  $r['pending']     = $attr('Current_Pending_Sector');
+  $r['offline_unc'] = $attr('Offline_Uncorrectable');
+  if ($r['temp'] === null) $r['temp'] = $attr('Temperature_Celsius');
+  if ($r['hours'] === null) $r['hours'] = $attr('Power_On_Hours');
+  return $r;
+}
+
+/* ---------- Full check ---------- */
+
+function p410_check(array $cfg, bool $forceSmart = false): array {
+  $st = p410_status();
+  $res = ['ts' => date('c'), 'problem' => false, 'problems' => [], 'controllers' => [], 'drives' => []];
+  if (isset($st['error'])) { $res['problem'] = true; $res['problems'][] = $st['error']; return $res; }
+  $baseline = @json_decode(@file_get_contents(P410_BASELINE) ?: '{}', true) ?: [];
+  $prev = @json_decode(@file_get_contents(P410_STATE) ?: '{}', true) ?: [];
+  $prevDrives = [];
+  foreach ($prev['drives'] ?? [] as $d) $prevDrives[$d['serial'] ?? ''] = $d;
+  $baselineChanged = false;
+  $tw = (int)$cfg['TEMP_WARN'];
+
+  foreach ($st['controllers'] as $c) {
+    $d = $c['detail']; $slot = $c['slot'];
+    $ctrl = ['slot' => $slot, 'model' => $c['model'], 'status' => $d['Controller Status'] ?? '?',
+             'cache' => $d['Cache Status'] ?? '?', 'battery' => $d['Battery/Capacitor Status'] ?? '—',
+             'fw' => $d['Firmware Version'] ?? ''];
+    $res['controllers'][] = $ctrl;
+    if (strcasecmp($ctrl['status'], 'OK')) $res['problems'][] = p410_t('pr_ctrl', $slot, $ctrl['status']);
+    $ctrl['cache_ignored'] = $cfg['IGNORE_CACHE'] === 'yes'; $ctrl['battery_ignored'] = $cfg['IGNORE_BATTERY'] === 'yes';
+    if (!$ctrl['cache_ignored'] && strcasecmp($ctrl['cache'], 'OK')) $res['problems'][] = p410_t('pr_cache', $ctrl['cache']);
+    if (!$ctrl['battery_ignored'] && $ctrl['battery'] !== '—' && strcasecmp($ctrl['battery'], 'OK')) $res['problems'][] = p410_t('pr_batt', $ctrl['battery']);
+
+    $ldMap = []; $dev = null;
+    foreach ($c['lds'] as $l) {
+      $ldMap[$l['ld']] = $l;
+      if (!$dev && $l['present']) $dev = $l['dev'];
+      if (strcasecmp($l['status'], 'OK')) $res['problems'][] = p410_t('pr_ld', $l['ld'], $l['dev'], $l['status']);
+    }
+    $cmap = [];
+    if ($dev) {
+      $cached = @json_decode(@file_get_contents(P410_CACHE) ?: '[]', true)[$slot] ?? [];
+      $need = array_filter(array_column($c['pds'], 'serial'));
+      $cmap = ($cached && !array_diff($need, array_keys($cached))) ? $cached : p410_cciss_map($slot, $dev);
+    }
+
+    foreach ($c['pds'] as $p) {
+      $ld = $p['lds'] ? ($ldMap[$p['lds'][0]] ?? null) : null;
+      $drv = ['bay' => $p['bay'], 'pd' => $p['pd'], 'model' => $p['model'], 'serial' => $p['serial'],
+              'size' => $p['size'], 'status' => $p['status'], 'ld' => $ld['ld'] ?? null, 'dev' => $ld['dev'] ?? null,
+              'unraid' => $ld['unraid'] ?? ($p['unassigned'] ? 'unassigned' : ''),
+              'temp' => is_numeric($p['temp']) ? (int)$p['temp'] : null, 'smart' => null, 'problems' => []];
+      $label = p410_t('pr_label', $p['bay'], $p['serial'] . ($drv['unraid'] ? ", {$drv['unraid']}" : ''));
+      if (strcasecmp($p['status'], 'OK')) $drv['problems'][] = p410_t('pr_state', $p['status']);
+
+      $n = $cmap[$p['serial']] ?? null;
+      if ($n !== null && $dev) {
+        $o = []; $rc = 0;
+        $standby = $cfg['SKIP_STANDBY'] === 'yes' && !$forceSmart ? ' -n standby' : '';
+        exec('smartctl -a' . $standby . ' -d cciss,' . (int)$n . ' ' . escapeshellarg($dev) . ' 2>&1', $o, $rc);
+        if (($rc & 0x02) && $standby && preg_match('/STANDBY|SLEEP/i', implode("\n", $o))) {
+          $drv['smart'] = $prevDrives[$p['serial']]['smart'] ?? null;
+          $drv['standby'] = true;
+        } else {
+          $drv['smart'] = p410_parse_smart(implode("\n", $o));
+        }
+      }
+      $s = $drv['smart'];
+      if ($s) {
+        if ($drv['temp'] === null && $s['temp'] !== null) $drv['temp'] = $s['temp'];
+        if ($s['health'] !== null && !preg_match('/^(OK|PASSED)$/i', $s['health'])) $drv['problems'][] = "SMART: {$s['health']}";
+        if (($s['pending'] ?? 0) > 0) $drv['problems'][] = p410_t('pr_pending', $s['pending']);
+        if (($s['offline_unc'] ?? 0) > 0) $drv['problems'][] = p410_t('pr_offline', $s['offline_unc']);
+        $b = $baseline[$p['serial']] ?? null;
+        if ($b === null) {
+          $baseline[$p['serial']] = ['defects' => $s['defects'], 'realloc' => $s['realloc'], 'uncorrected' => $s['uncorrected']];
+          $baselineChanged = true;
+        } else {
+          foreach (['defects' => p410_t('c_defects'), 'realloc' => p410_t('c_realloc'), 'uncorrected' => p410_t('c_uncorr')] as $k => $name) {
+            if ($s[$k] !== null && $b[$k] !== null && $s[$k] > $b[$k]) $drv['problems'][] = p410_t('pr_increase', $name, $b[$k], $s[$k]);
+          }
+        }
+      }
+      if ($drv['temp'] !== null && $drv['temp'] >= $tw) $drv['problems'][] = p410_t('pr_temp', $drv['temp'], $tw);
+      foreach ($drv['problems'] as $pr) $res['problems'][] = "$label: $pr";
+      $res['drives'][] = $drv;
+    }
+  }
+  if ($baselineChanged) { @mkdir(P410_CFG_DIR, 0755, true); @file_put_contents(P410_BASELINE, json_encode($baseline)); }
+  $res['problem'] = (bool)$res['problems'];
+  return $res;
+}
+
+function p410_baseline_reset(): void { @unlink(P410_BASELINE); }
+
+/* ---------- MQTT 3.1.1 (QoS 0) ---------- */
+
+function p410_mqtt_str(string $s): string { return pack('n', strlen($s)) . $s; }
+function p410_mqtt_len(int $n): string {
+  $o = '';
+  do { $b = $n % 128; $n = intdiv($n, 128); if ($n > 0) $b |= 0x80; $o .= chr($b); } while ($n > 0);
+  return $o;
+}
+
+/* $msgs = [[topic, payload, retain], ...] */
+function p410_mqtt_publish(array $cfg, array $msgs, ?string &$err = null): bool {
+  $sock = @stream_socket_client('tcp://' . $cfg['MQTT_HOST'] . ':' . (int)$cfg['MQTT_PORT'], $eno, $estr, 5);
+  if (!$sock) { $err = p410_t('mqtt_conn_fail', $cfg['MQTT_HOST'], $cfg['MQTT_PORT'], $estr); return false; }
+  stream_set_timeout($sock, 5);
+  $flags = 0x02; $payload = p410_mqtt_str('p410mgr-' . substr(md5(gethostname() . getmypid()), 0, 8));
+  if ($cfg['MQTT_USER'] !== '') { $flags |= 0x80; }
+  if ($cfg['MQTT_USER'] !== '' && $cfg['MQTT_PASS'] !== '') { $flags |= 0x40; }
+  if ($flags & 0x80) $payload .= p410_mqtt_str($cfg['MQTT_USER']);
+  if ($flags & 0x40) $payload .= p410_mqtt_str($cfg['MQTT_PASS']);
+  $vh = p410_mqtt_str('MQTT') . chr(4) . chr($flags) . pack('n', 30);
+  fwrite($sock, chr(0x10) . p410_mqtt_len(strlen($vh . $payload)) . $vh . $payload);
+  $ack = fread($sock, 4);
+  if (strlen($ack) < 4 || ord($ack[0]) !== 0x20 || ord($ack[3]) !== 0) {
+    $codes = [1 => p410_t('mqtt_rc1'), 2 => p410_t('mqtt_rc2'), 3 => p410_t('mqtt_rc3'), 4 => p410_t('mqtt_rc4'), 5 => p410_t('mqtt_rc5')];
+    $err = p410_t('mqtt_rejected') . (strlen($ack) >= 4 ? ': ' . ($codes[ord($ack[3])] ?? p410_t('mqtt_rcx', ord($ack[3]))) : p410_t('mqtt_noack'));
+    fclose($sock); return false;
+  }
+  foreach ($msgs as [$topic, $data, $retain]) {
+    $body = p410_mqtt_str($topic) . $data;
+    fwrite($sock, chr(0x30 | ($retain ? 1 : 0)) . p410_mqtt_len(strlen($body)) . $body);
+  }
+  fwrite($sock, chr(0xE0) . chr(0));
+  fclose($sock);
+  return true;
+}
+
+/* ---------- MQTT messages + Home Assistant discovery ---------- */
+
+function p410_mqtt_messages(array $cfg, array $res, array $newProblems): array {
+  $t = $cfg['MQTT_TOPIC'];
+  $j = fn($a) => json_encode($a, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+  $ctrl = $res['controllers'][0] ?? [];
+  $temps = array_filter(array_column($res['drives'], 'temp'), fn($x) => $x !== null);
+  $state = ['problem' => $res['problem'], 'problems' => $res['problems'], 'problem_count' => count($res['problems']),
+            'controller' => $ctrl['status'] ?? null, 'cache' => $ctrl['cache'] ?? null, 'battery' => $ctrl['battery'] ?? null,
+            'max_temp' => $temps ? max($temps) : null, 'drives' => count($res['drives']), 'ts' => $res['ts']];
+  $msgs = [["$t/state", $j($state), true], ["$t/problem", $res['problem'] ? 'ON' : 'OFF', true]];
+  foreach ($res['drives'] as $d) {
+    $msgs[] = ["$t/bay/{$d['bay']}", $j([
+      'status' => $d['problems'] ? 'PROBLEM' : 'OK', 'problems' => $d['problems'], 'temp' => $d['temp'],
+      'model' => $d['model'], 'serial' => $d['serial'], 'unraid' => $d['unraid'], 'dev' => $d['dev'], 'ld' => $d['ld'],
+      'hours' => $d['smart']['hours'] ?? null, 'defects' => $d['smart']['defects'] ?? null,
+      'realloc' => $d['smart']['realloc'] ?? null, 'pending' => $d['smart']['pending'] ?? null,
+      'uncorrected' => $d['smart']['uncorrected'] ?? null, 'health' => $d['smart']['health'] ?? null,
+    ]), true];
+  }
+  if ($newProblems) $msgs[] = ["$t/alert", $j(['ts' => $res['ts'], 'new' => $newProblems, 'all' => $res['problems']]), false];
+
+  if ($cfg['MQTT_DISCOVERY'] === 'yes') {
+    $p = $cfg['MQTT_DISCOVERY_PREFIX'];
+    $dev = ['identifiers' => ['p410mgr_' . gethostname()], 'name' => 'Smart Array P410 (' . gethostname() . ')',
+            'manufacturer' => 'HP', 'model' => $ctrl['model'] ?? 'Smart Array', 'sw_version' => $ctrl['fw'] ?? ''];
+    $uid = 'p410mgr_' . preg_replace('/\W/', '_', gethostname());
+    $msgs[] = ["$p/binary_sensor/$uid/problem/config", $j(['name' => p410_t('ha_problem'), 'unique_id' => "{$uid}_problem",
+      'device_class' => 'problem', 'state_topic' => "$t/state", 'value_template' => "{{ 'ON' if value_json.problem else 'OFF' }}",
+      'json_attributes_topic' => "$t/state", 'json_attributes_template' => '{{ {"problems": value_json.problems} | tojson }}',
+      'device' => $dev]), true];
+    foreach (['controller' => [p410_t('ha_controller'), 'mdi:expansion-card'], 'cache' => [p410_t('ha_cache'), 'mdi:memory'], 'battery' => [p410_t('ha_battery'), 'mdi:battery']] as $k => [$name, $icon]) {
+      $msgs[] = ["$p/sensor/$uid/$k/config", $j(['name' => $name, 'unique_id' => "{$uid}_$k", 'icon' => $icon,
+        'state_topic' => "$t/state", 'value_template' => "{{ value_json.$k }}", 'device' => $dev]), true];
+    }
+    $msgs[] = ["$p/sensor/$uid/max_temp/config", $j(['name' => p410_t('ha_maxtemp'), 'unique_id' => "{$uid}_max_temp",
+      'device_class' => 'temperature', 'unit_of_measurement' => '°C', 'state_class' => 'measurement',
+      'state_topic' => "$t/state", 'value_template' => '{{ value_json.max_temp }}', 'device' => $dev]), true];
+    foreach ($res['drives'] as $d) {
+      $b = (int)$d['bay'];
+      $msgs[] = ["$p/sensor/$uid/bay{$b}_temp/config", $j(['name' => p410_t('ha_bay_temp', $b), 'unique_id' => "{$uid}_bay{$b}_temp",
+        'device_class' => 'temperature', 'unit_of_measurement' => '°C', 'state_class' => 'measurement',
+        'state_topic' => "$t/bay/$b", 'value_template' => '{{ value_json.temp }}', 'device' => $dev]), true];
+      $msgs[] = ["$p/sensor/$uid/bay{$b}_status/config", $j(['name' => p410_t('ha_bay_status', $b), 'unique_id' => "{$uid}_bay{$b}_status",
+        'icon' => 'mdi:harddisk', 'state_topic' => "$t/bay/$b", 'value_template' => '{{ value_json.status }}',
+        'json_attributes_topic' => "$t/bay/$b", 'device' => $dev]), true];
+    }
+  }
+  return $msgs;
+}
+
+/* Full cycle: check, compare with previous run, notify, MQTT */
+function p410_run_check(bool $forceSmart = false): array {
+  $cfg = p410_cfg_load();
+  $prev = @json_decode(@file_get_contents(P410_STATE) ?: '{}', true) ?: [];
+  $res = p410_check($cfg, $forceSmart);
+  $newProblems = array_values(array_diff($res['problems'], $prev['problems'] ?? []));
+  $resolved = array_values(array_diff($prev['problems'] ?? [], $res['problems']));
+  $res['new'] = $newProblems; $res['resolved'] = $resolved;
+
+  if ($cfg['NOTIFY'] === 'yes' && is_executable('/usr/local/emhttp/webGui/scripts/notify')) {
+    if ($newProblems) exec('/usr/local/emhttp/webGui/scripts/notify -e "Smart Array P410" -s ' . escapeshellarg(p410_t('ntf_problem', count($newProblems)))
+      . ' -d ' . escapeshellarg(implode('; ', $newProblems)) . ' -i alert');
+    if ($resolved && !$res['problem']) exec('/usr/local/emhttp/webGui/scripts/notify -e "Smart Array P410" -s ' . escapeshellarg(p410_t('ntf_resolved')) . ' -d '
+      . escapeshellarg(implode('; ', $resolved)) . ' -i normal');
+  }
+  $res['mqtt'] = null;
+  if ($cfg['MQTT_ENABLED'] === 'yes' && $cfg['MQTT_HOST'] !== '') {
+    $err = null;
+    $res['mqtt'] = p410_mqtt_publish($cfg, p410_mqtt_messages($cfg, $res, $newProblems), $err) ? 'OK' : $err;
+  }
+  @file_put_contents(P410_STATE, json_encode($res, JSON_UNESCAPED_UNICODE));
+  return $res;
+}
+]]></INLINE>
+</FILE>
+<FILE Name="/usr/local/emhttp/plugins/p410mgr/scripts/check.php">
+<INLINE><![CDATA[
+<?php
+/* p410mgr — cykliczne sprawdzenie (cron) */
+require_once '/usr/local/emhttp/plugins/p410mgr/include/monitor.php';
+$lock = fopen('/tmp/p410mgr_check.lock', 'c');
+if (!$lock || !flock($lock, LOCK_EX | LOCK_NB)) exit(0);
+$force = in_array('--force', $argv, true);
+$r = p410_run_check($force);
+echo ($r['problem'] ? 'PROBLEM: ' . implode('; ', $r['problems']) : 'OK') . "\n";
+if ($r['mqtt'] !== null) echo "MQTT: {$r['mqtt']}\n";
+]]></INLINE>
+</FILE>
+<FILE Name="/usr/local/emhttp/plugins/p410mgr/scripts/extract_deb.php">
+<INLINE><![CDATA[
+<?php
+/* Extracts a .deb package without 'ar' (not available on Unraid).
+   Usage: php extract_deb.php file.deb destdir */
+if ($argc < 3) { fwrite(STDERR, "usage: extract_deb.php file.deb destdir\n"); exit(2); }
+[$_, $deb, $dest] = $argv;
+$f = @fopen($deb, 'rb');
+if (!$f || fread($f, 8) !== "!<arch>\n") { fwrite(STDERR, "Not a .deb (ar) archive: $deb\n"); exit(1); }
+@mkdir($dest, 0755, true);
+$found = false;
+while (!feof($f)) {
+  $hdr = fread($f, 60);
+  if ($hdr === false || strlen($hdr) < 60) break;
+  $name = rtrim(substr($hdr, 0, 16), " /");
+  $size = (int)trim(substr($hdr, 48, 10));
+  if (str_starts_with($name, 'data.tar')) {
+    $tmp = rtrim($dest, '/') . '/' . $name;
+    $o = fopen($tmp, 'wb');
+    $left = $size;
+    while ($left > 0) { $chunk = fread($f, min(1 << 20, $left)); if ($chunk === '' || $chunk === false) break; fwrite($o, $chunk); $left -= strlen($chunk); }
+    fclose($o);
+    $flag = str_ends_with($name, '.xz') ? 'J' : (str_ends_with($name, '.gz') ? 'z' : (str_ends_with($name, '.zst') ? '' : ''));
+    $cmd = str_ends_with($name, '.zst')
+      ? 'zstd -dc ' . escapeshellarg($tmp) . ' | tar -x --no-same-owner -C ' . escapeshellarg($dest)
+      : 'tar -x' . $flag . 'f ' . escapeshellarg($tmp) . ' --no-same-owner -C ' . escapeshellarg($dest);
+    passthru($cmd, $rc);
+    unlink($tmp);
+    if ($rc !== 0) { fwrite(STDERR, "tar failed ($rc)\n"); exit(1); }
+    $found = true;
+    break;
+  }
+  fseek($f, $size + ($size % 2), SEEK_CUR);
+}
+fclose($f);
+if (!$found) { fwrite(STDERR, "data.tar.* not found in $deb\n"); exit(1); }
+echo "OK\n";
+]]></INLINE>
+</FILE>
+<FILE Name="/usr/local/emhttp/plugins/p410mgr/scripts/install.sh" Mode="0755">
+<INLINE><![CDATA[
+#!/bin/bash
+# p410mgr — installs hpssacli (runs on plugin install and on every boot)
+PLG=/boot/config/plugins/p410mgr
+EMH=/usr/local/emhttp/plugins/p410mgr
+DEB=hpssacli-2.40-13.0_amd64.deb
+URL=https://downloads.linux.hpe.com/SDR/repo/mcp/pool/non-free/$DEB
+
+mkdir -p "$PLG"
+
+if [ ! -s "$PLG/$DEB" ]; then
+  echo "Downloading $DEB from the HPE repository..."
+  if curl -fsSL --retry 6 --retry-delay 5 --connect-timeout 10 -o "$PLG/$DEB.tmp" "$URL"; then
+    mv "$PLG/$DEB.tmp" "$PLG/$DEB"
+  else
+    rm -f "$PLG/$DEB.tmp"
+    echo "Could not download $DEB."
+  fi
+fi
+
+if [ -s "$PLG/$DEB" ]; then
+  rm -rf /tmp/p410mgr_x
+  if ! php "$EMH/scripts/extract_deb.php" "$PLG/$DEB" /tmp/p410mgr_x; then
+    echo "Failed to extract $DEB – removing it, please reinstall the plugin."
+    rm -f "$PLG/$DEB"; rm -rf /tmp/p410mgr_x; exit 1
+  fi
+  mkdir -p /opt/hp && rm -rf /opt/hp/hpssacli
+  cp -a /tmp/p410mgr_x/opt/hp/hpssacli /opt/hp/
+  rm -rf /tmp/p410mgr_x
+elif [ -d /boot/extra-tools/hpssacli/opt/hp/hpssacli ]; then
+  echo "Using previously extracted copy from /boot/extra-tools/hpssacli"
+  mkdir -p /opt/hp && rm -rf /opt/hp/hpssacli
+  cp -r /boot/extra-tools/hpssacli/opt/hp/hpssacli /opt/hp/
+else
+  echo "ERROR: hpssacli not available. Copy $DEB manually to $PLG and reinstall the plugin."
+  exit 1
+fi
+
+chmod -R u+x /opt/hp/hpssacli
+BIN=$(find /opt/hp/hpssacli -type f -name hpssacli | head -1)
+if [ -z "$BIN" ]; then echo "ERROR: hpssacli binary not found after extraction."; exit 1; fi
+ln -sf "$BIN" /usr/local/sbin/hpssacli
+echo "hpssacli: $BIN"
+/usr/local/sbin/hpssacli ctrl all show 2>&1 | grep -i "slot" || echo "Warning: hpssacli did not detect a controller."
+[ -x /usr/local/sbin/update_cron ] && /usr/local/sbin/update_cron
+echo "Smart Array P410 plugin installed – Settings → User Utilities → Smart Array P410 (+ Dashboard tile)"
+]]></INLINE>
+</FILE>
+<FILE Run="/bin/bash">
+<INLINE><![CDATA[
+bash /usr/local/emhttp/plugins/p410mgr/scripts/install.sh
+]]></INLINE>
+</FILE>
+
+<FILE Run="/bin/bash" Method="remove">
+<INLINE><![CDATA[
+rm -f /usr/local/sbin/hpssacli /tmp/p410mgr_cciss.json /tmp/p410mgr_state.json /boot/config/plugins/p410mgr/p410mgr.cron
+/usr/local/sbin/update_cron 2>/dev/null
+rm -rf /opt/hp/hpssacli /usr/local/emhttp/plugins/p410mgr
+# settings (p410mgr.cfg), SMART baseline and the hpssacli package stay on the flash drive
+# full removal: rm -rf /boot/config/plugins/p410mgr
+echo "Smart Array P410 plugin removed."
+]]></INLINE>
+</FILE>
+</PLUGIN>
