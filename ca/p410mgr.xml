@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Plugin>
+  <Name>Smart Array P410</Name>
+  <PluginURL>https://raw.githubusercontent.com/francuz152/unraid-p410mgr/main/p410mgr.plg</PluginURL>
+  <PluginAuthor>francuz152</PluginAuthor>
+  <Support>https://forums.unraid.net/topic/201205-plugin-smart-array-p410-hp-smart-array-management-smart-monitoring-mqtthome-assistant/</Support>
+  <Project>https://github.com/francuz152/unraid-p410mgr</Project>
+  <Icon>https://raw.githubusercontent.com/francuz152/unraid-p410mgr/main/p410mgr.png</Icon>
+  <Category>Tools:System Drivers:</Category>
+  <Overview>Manage HP Smart Array controllers (P410, P410i, P212, P812 and related G6/G7 models) from the Unraid GUI: controller, cache and battery status, bay to logical drive to /dev to Unraid slot mapping, SMART through the controller, locate LED, create and delete RAID0 logical drives without rebooting, periodic SMART checks with Unraid notifications, MQTT with Home Assistant discovery and a Dashboard tile.</Overview>
+  <Description>
+Manage HP Smart Array controllers (P410, P410i, P212, P812 and related G6/G7 models) directly from the Unraid web UI, without rebooting into the Option ROM.
+
+- Controller, firmware, cache and battery status
+- Drive map: bay, physical drive, logical drive, /dev device and Unraid slot
+- SMART read through the controller (smartctl -d cciss,N), index detected automatically
+- Locate LED, create RAID0 logical drive for a new disk, delete unused logical drives (blocked while in use)
+- Periodic SMART and controller checks with Unraid notifications
+- MQTT publishing with Home Assistant discovery (built-in client)
+- Dashboard tile, English and Polish UI
+
+HPE hpssacli 2.40 is downloaded during installation from the official HPE repository and is subject to the HPE license.
+  </Description>
+  <MinVer>6.12.0</MinVer>
+</Plugin>
