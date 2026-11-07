@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<CommunityApplications>
+  <Profile>Unraid plugin for managing HP Smart Array controllers (P410 and related G6/G7 models) from the Unraid GUI: status, SMART, locate LED, RAID0 logical drives, periodic monitoring with Unraid notifications and MQTT / Home Assistant discovery. Please report problems in the support thread or on GitHub Issues.</Profile>
+  <Icon>https://raw.githubusercontent.com/francuz152/unraid-p410mgr/main/p410mgr.png</Icon>
+  <WebPage>https://github.com/francuz152/unraid-p410mgr</WebPage>
+  <Forum>https://forums.unraid.net/topic/201205-plugin-smart-array-p410-hp-smart-array-management-smart-monitoring-mqtthome-assistant/</Forum>
+</CommunityApplications>
