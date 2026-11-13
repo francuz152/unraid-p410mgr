@@ -8,6 +8,10 @@ VERSION = "2026.11.07f"
 GITHUB = "francuz152/unraid-p410mgr"
 BRANCH = "main"
 EMH = "/usr/local/emhttp/plugins/p410mgr"
+# HPE hpssacli package: the plugin manager downloads it to the flash and checks
+# this SHA256 before install.sh runs. Update both lines together.
+HPSSACLI_DEB = "hpssacli-2.40-13.0_amd64.deb"
+HPSSACLI_SHA256 = "5c131a25f9373c6382c25a04627ac735ca571b975712e53de0aed29126778787"
 
 FILES = [
     ("P410mgr.page", f"{EMH}/P410mgr.page"),
@@ -69,7 +73,12 @@ for src, dst in FILES:
     mode = ' Mode="0755"' if dst.endswith(".sh") else ""
     parts.append(f'<FILE Name="{dst}"{mode}>\n<INLINE>{cdata((SRC / src).read_text())}</INLINE>\n</FILE>\n')
 
-parts.append(f"""<FILE Run="/bin/bash">
+parts.append(f"""<FILE Name="&plugin;/{HPSSACLI_DEB}">
+<URL>https://downloads.linux.hpe.com/SDR/repo/mcp/pool/non-free/{HPSSACLI_DEB}</URL>
+<SHA256>{HPSSACLI_SHA256}</SHA256>
+</FILE>
+
+<FILE Run="/bin/bash">
 <INLINE>{cdata('bash ' + EMH + '/scripts/install.sh' + chr(10))}</INLINE>
 </FILE>
 
